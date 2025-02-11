@@ -1,8 +1,15 @@
 import pandas as pd
 import streamlit as st
+import ast
+import os
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import train_test_split
+
 
 # Constants for the dashboard
-TITLE_ICON = ":star:"
+TITLE_ICON = "🏋️‍♂️"
 HIDE_STREAMLIT_STYLE = """
     <style>
     MainMenu {visibility: hidden;}
@@ -11,215 +18,340 @@ HIDE_STREAMLIT_STYLE = """
     </style>
     """
 
+
 # Load the data with caching to improve performance
 @st.cache_data
-def get_data(file_path: str, file_name: str):
+def get_data(file_path: str):
     """Loads data from a CSV file and returns a DataFrame."""
-    df = pd.read_csv(file_path + file_name)  
+    df = pd.read_csv(file_path)
+
+    # Ensure numeric columns have appropriate types
+    df['Age'] = df['Age'].astype(int)
+    df['Duration'] = df['Duration'].astype(int)
+    df['BMI'] = df['BMI'].astype(float)
+    df['Intensity'] = df['Intensity'].astype(int)
+
+    # Apply One-Hot Encoding for the 'Gender' column
+    df = pd.get_dummies(df, columns=['Gender'], drop_first=True)
+
     return df
 
-# Function to categorize BMI
-def categorize_bmi(df):
-    """
-    Categorizes individuals into different BMI groups.
 
-    Parameters:
-    - df: DataFrame containing BMI values.
+def get_bmi_category(df):
+    # Define the BMI categories based on ranges
+    df['BMI Category'] = pd.cut(df['BMI'], bins=[0, 18.5, 24.9, 29.9, float('inf')],
+                                labels=['Underweight', 'Normal', 'Overweight', 'Obese'], right=False)
 
-    Returns:
-    - DataFrame with an additional column 'BMI Category' indicating the BMI group.
-    """
-    categories = ['Underweight', 'Normal weight', 'Overweight', 'Obesity']
-    df['BMI Category'] = pd.cut(df['BMI'], 
-                                bins=[-float('inf'), 18.5, 24.9, 29.9, float('inf')], 
-                                labels=categories)
     return df
 
-# Function to recommend exercises based on gender, age, and BMI category
-def get_recommended_exercises(df, gender, age, bmi_category):
-    """
-    Returns recommended exercises based on gender, age, and BMI category.
 
-    Parameters:
-    - df: DataFrame containing exercise data.
-    - gender: The gender of the user (e.g., 'Male' or 'Female').
-    - age: The age of the user.
-    - bmi_category: The BMI category of the user (e.g., 'Underweight', 'Normal weight', 'Overweight', 'Obesity').
+# Function to encode BMI categories using OneHotEncoder
+def one_hot_encode_bmi_category(df):
+    # Initialize the OneHotEncoder
+    encoder = OneHotEncoder(drop='first', sparse_output=False)  # Use sparse_output=False to get a dense array directly
 
-    Returns:
-    - recommended_exercises: A list of recommended exercises based on the user's profile.
-    """
-    # Filter the dataframe based on gender
-    filtered_df = df[df['Gender'] == gender]
+    # Fit and transform the BMI Category column
+    encoded_array = encoder.fit_transform(df[['BMI Category']])
 
-    # Further filter based on age groups
-    if age < 18:
-        filtered_df = filtered_df[filtered_df['Age'] < 18]
-    elif 18 <= age < 35:
-        filtered_df = filtered_df[(filtered_df['Age'] >= 18) & (filtered_df['Age'] < 35)]
-    elif 35 <= age < 50:
-        filtered_df = filtered_df[(filtered_df['Age'] >= 35) & (filtered_df['Age'] < 50)]
-    elif 50 <= age <= 60:
-        filtered_df = filtered_df[(filtered_df['Age'] >= 50) & (filtered_df['Age'] <= 60)]
-    else:
-        return "Invalid age input."
+    # Create a DataFrame for the encoded features
+    encoded_df = pd.DataFrame(
+        encoded_array,
+        columns=encoder.get_feature_names_out(['BMI Category']),
+        index=df.index  # Ensures alignment of indices between original df and encoded_df
+    )
 
-    # Further filter based on BMI category
-    filtered_df = filtered_df[filtered_df['BMI Category'] == bmi_category]
+    # Concatenate the encoded features with the original DataFrame
+    df = pd.concat([df, encoded_df], axis=1)
 
-    # Check if there are any matching records
-    if filtered_df.empty:
-        return "No matching data found for the given profile."
-
-    # Get the list of unique recommended exercises
-    recommended_exercises = filtered_df['Exercise'].unique().tolist()
-
-    # Check if any exercises were found
-    if not recommended_exercises:
-        return "No recommended exercises found for the selected profile."
-
-    return recommended_exercises
-
-# Function to categorize exercise intensity
-def categorize_exercise_intensity(intensity):
-    """
-    Categorizes exercise intensity into different groups.
-    - Low: 1 to 3
-    - Moderate: 4 to 6
-    - High: 7 to 10
-    """
-    if 1 <= intensity <= 3:
-        return 'Low'
-    elif 4 <= intensity <= 6:
-        return 'Moderate'
-    elif 7 <= intensity <= 10:
-        return 'High'
-    else:
-        return 'Unknown'  
-
-# Apply the exercise intensity categorization to the dataframe
-def apply_exercise_intensity(df):
-    df['Intensity Category'] = df['Exercise Intensity'].apply(categorize_exercise_intensity)
     return df
 
-# Function to recommend exercises based on intensity and duration
-def get_recommended_exercises_intensity(df, intensity_category, duration):
+
+def get_exercise_details(df, recommended_exercises):
     """
-    Returns recommended exercises based on intensity category and duration.
+    Returns exercise types and image paths for the given list of recommended exercises.
 
     Parameters:
-    - df: DataFrame containing exercise data.
-    - intensity_category: The category of exercise intensity ('Low', 'Moderate', 'High').
-    - duration: The maximum duration for the recommended exercises.
+    - df: DataFrame containing exercise data with exercise types and image paths.
+    - recommended_exercises: A list of recommended exercises.
 
     Returns:
-    - recommended_exercises: A list of recommended exercises based on intensity and duration.
+    - exercise_details: A list of dictionaries containing exercise types and image paths for each recommended exercise.
     """
-    # Filter the dataframe
-    filtered_df = df[df['Intensity Category'] == intensity_category]
-    filtered_df = filtered_df[filtered_df['Duration'] <= duration]
+    # Initialize a list to hold the exercise details
+    exercise_details = []
 
-    # Check if there are any matching records
-    if filtered_df.empty:
-        return "No matching data found for the given profile."
+    # Iterate over each recommended exercise
+    for exercise in recommended_exercises:
+        # Filter the DataFrame for the current exercise
+        exercise_info = df[df['Exercise'] == exercise]
 
-    # Get the list of unique recommended exercises
-    recommended_exercises = filtered_df['Exercise'].unique().tolist()
+        # If the exercise is found, extract the exercise types and image paths
+        if not exercise_info.empty:
+            for _, row in exercise_info.iterrows():
+                exercise_details.append({
+                    'Exercise Type': row['Exercise Type'],  # Assuming there's a column named 'Exercise Type'
+                    'Image Path': row['Image Paths']  # Assuming there's a column named 'Image Paths'
+                })
 
-    # Check if any exercises were found
-    if not recommended_exercises:
-        return "No recommended exercises found for the selected profile."
+    return exercise_details
 
-    return recommended_exercises
 
-# Streamlit Dashboard
+def flatten_image_paths(image_paths):
+    """Flatten any nested lists of image paths."""
+    if isinstance(image_paths, list):
+        return [img for sublist in image_paths for img in (sublist if isinstance(sublist, list) else [sublist])]
+    return []
+
+
+def safe_literal_eval(value):
+    try:
+        return eval(value) if isinstance(value, str) else value
+    except:
+        return []
+
+
+def combine_columns_per_category(df, exercise_category_column, exercise_types_columns_prefix,
+                                 image_paths_columns_prefix):
+    """Combine multiple columns for each exercise category."""
+    combined_data = []
+
+    for _, row in df.iterrows():
+        exercise_category = row[exercise_category_column]
+
+        # Combine all Exercise Types for the current exercise category
+        exercise_types = []
+        j = 0
+        while f"{exercise_types_columns_prefix}{j}" in df.columns:
+            exercise_types.append(row[f"{exercise_types_columns_prefix}{j}"])
+            j += 1
+
+        # Combine all Image Paths for the current exercise category
+        image_paths = []
+        j = 0
+        while f"{image_paths_columns_prefix}{j}" in df.columns:
+            image_paths.append(safe_literal_eval(row[f"{image_paths_columns_prefix}{j}"]))
+            j += 1
+
+        # Flatten the image paths
+        image_paths = flatten_image_paths(image_paths)
+
+        # Add combined exercise types and image paths to the data
+        combined_data.append({
+            'Exercise Category': exercise_category,
+            'Combined Exercise Types': exercise_types,
+            'Combined Image Paths': image_paths
+        })
+
+    # Convert combined data into a new DataFrame
+    combined_df = pd.DataFrame(combined_data)
+    return combined_df
+
+
+# Function to recommend exercises using KNN
+def knn_recommend_exercises(df, gender, age, bmi_category, intensity_category, duration):
+    # Initialize the user profile with default values
+    user_profile = {
+        'Gender_Male': [1 if gender == 'Male' else 0],
+        'Age': [age],
+        'Intensity': [intensity_category],
+        'Duration': [duration]
+    }
+
+    # Dynamically add BMI one-hot encoded columns to user profile
+    for column in df.filter(like='BMI Category_').columns:
+        user_profile[column] = [1 if column == f'BMI Category_{bmi_category}' else 0]
+
+    # Convert user_profile to DataFrame
+    user_profile_df = pd.DataFrame(user_profile)
+
+    # Define feature columns for training
+    feature_columns = ['Gender_Male', 'Age', 'Intensity', 'Duration'] + df.filter(like='BMI Category_').columns.tolist()
+
+    # Prepare data for training
+    X = df[feature_columns]
+    y = df['Exercise']  # Assuming 'Exercise' is the target column
+
+    # Standardize the data
+    sc = StandardScaler()
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    X_train_std = sc.fit_transform(X_train)
+    X_test_std = sc.transform(X_test)
+
+    # Reindex the user profile to match the training feature columns
+    user_profile_df = user_profile_df.reindex(columns=feature_columns, fill_value=0)
+
+    # Train the KNN model
+    knn = KNeighborsClassifier(n_neighbors=3)
+    knn.fit(X_train_std, y_train)
+
+    # Standardize the user profile before prediction
+    user_profile_std = sc.transform(user_profile_df)
+
+    # Predict recommended exercises
+    predicted_exercises = knn.predict(user_profile_std)
+
+    # Evaluate model accuracy
+    y_pred = knn.predict(X_test_std)
+    acc = accuracy_score(y_test, y_pred)
+
+    return predicted_exercises.tolist()
+
+
+def clean_image_paths(image_paths):
+    """Convert string paths to list and replace backslashes with forward slashes."""
+    image_list = ast.literal_eval(image_paths)  # Convert string to actual list
+    cleaned_paths = [path.replace("\\", "/") for path in image_list]
+    return cleaned_paths
+
+
+# Function to display exercise images based on the exercise category
+def display_exercises(df):
+    # Standardize column names to avoid issues with spaces or variations
+    # Print the column names to confirm
+    #st.write(f"Columns in the DataFrame: {df.columns}")
+    #st.write(df.columns)
+
+    exercise_columns = [col for col in df.columns if col.startswith('Exercise Types')]
+    image_columns = [col for col in df.columns if col.startswith('Image Paths')]
+
+    # Iterate over each row in the dataframe
+    for idx, row in df.iterrows():
+        exercise_category = row['Exercise_Category']
+        st.write(f"### **Exercise Category: {exercise_category}**")
+
+        # Iterate through the pairs of columns: Exercise Types and Image Paths
+        for i, (exercise_col, image_col) in enumerate(zip(exercise_columns, image_columns)):
+            exercise_type = row[exercise_col]
+            image_path = row[image_col]
+
+            # Check if both exercise type and image path exist for this pair
+            if pd.notnull(exercise_type) and pd.notnull(image_path):
+                st.write(f"**Exercise Type {i + 1}:** {exercise_type}")
+                st.write(f"Processing Image {i + 1}: {image_path}")
+
+                # Display the image if it exists
+                if os.path.exists(image_path):
+                    st.image(image_path, caption=exercise_type, use_column_width=True)
+                else:
+                    st.write(f"Image not found: {image_path}")
+            else:
+                st.write(f"Skipping pair {i + 1} (missing data).")
+
+
 def streamlit_dashboard(df):
-    st.title("Basic Exercise Recommendations")
+    """Set up the main dashboard for exercise recommendations."""
 
-    # Input user profile
-    st.subheader("User Input:")
+    # User input for filtering
+    selected_gender = st.selectbox("Gender:", options=['Male', 'Female'])
+    age = st.slider("Age", min_value=int(df['Age'].min()), max_value=int(df['Age'].max()), value=int(df['Age'].mean()))
+    selected_bmi_category = st.selectbox("BMI Category:", options=df['BMI Category'].unique().tolist())
+    selected_intensity_category = st.selectbox('Intensity:', options=df['Intensity'].unique().tolist())
+    duration = st.slider("Duration", min_value=int(df['Duration'].min()), max_value=int(df['Duration'].max()),
+                         value=int(df['Duration'].mean()))
 
-    st.divider()
+    if st.button("Get Exercise Recommendation"):
+        # Placeholder for exercise recommendation logic (replace with actual function)
+        recommended_exercises = knn_recommend_exercises(df, selected_gender, age, selected_bmi_category,
+                                                        selected_intensity_category, duration)
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        gender = df['Gender'].unique().tolist()
-        selected_gender = st.selectbox("Gender:", options=gender) 
-    with col2:
-        min_age = df['Age'].min()
-        max_age = df['Age'].max()
-        age = st.slider("Age", min_value=min_age, max_value=max_age, value=(min_age + max_age) // 2)
-    with col3:
-        bmi_category = df['BMI Category'].unique().tolist()
-        selected_bmi_category = st.selectbox("BMI Category:", options=bmi_category)
+        # Debugging: Print recommended exercises
+        st.write(f"Recommended Exercises: {recommended_exercises}")
 
-    st.divider()
+        # Remove duplicates
+        recommended_exercises = list(set(recommended_exercises))  # Remove duplicates
 
-    col1, col2 = st.columns(2)
-    with col1:
-        intensity_category = df['Intensity Category'].unique().tolist()
-        selected_intensity_category = st.selectbox('Intensity Category:', options=intensity_category)  
-    with col2:
-        min_duration = df['Duration'].min()
-        max_duration = df['Duration'].max()
-        duration = st.slider("Duration", min_value=min_duration, max_value=max_duration, value=(min_duration + max_duration) // 3)
+        if recommended_exercises:
+            st.session_state['recommended_exercises'] = recommended_exercises
+            st.write(
+                f"Recommended Exercises for {selected_gender}, Age: {age}, BMI Category: {selected_bmi_category}, "
+                f"Intensity: {selected_intensity_category}, Duration: {duration}:")
+            for exercise in recommended_exercises:
+                st.write(f"- {exercise}")
+        else:
+            st.write("No exercises found for the selected criteria.")
 
-    st.divider()
+    if st.button("Display Recommended Exercises"):
+        if 'recommended_exercises' in st.session_state:
+            recommended_exercises = st.session_state.recommended_exercises
 
-    st.markdown("### Exercise Recommendation Overview")
-    st.markdown("""
-    This dashboard provides basic exercise recommendations based on user inputs.
-    You can explore recommendations based on different criteria such as:
-    - **Gender, Age and BMI**: Get recommendations tailored to your gender, age group and BMI category.
-    - **Intensity and Duration**: Find exercises that match your preferred intensity level and workout duration.
-    """)
-    st.markdown("#### Instructions:")
-    st.write("- For recommendations by Age and BMI, provide your gender, age, and BMI category.")
-    st.write("- For recommendations by Intensity, provide your preferred intensity category and workout duration.")
+            if recommended_exercises:
+                st.write("**Recommended Exercises Details:**")
 
-    # Selectbox for choosing the action
-    selected_choice = st.selectbox("Choose Recommendation Type", 
-                                   options=["Recommended Exercises by Age and BMI", 
-                                            "Recommended Exercises by Intensity"])
-    
-    # Button to trigger display of the selected option
-    if st.button("Display Recommendation"):
-        if selected_choice == "Recommended Exercises by Age and BMI":
-            recommended_exercises = get_recommended_exercises(df, selected_gender, age, selected_bmi_category)
-            if isinstance(recommended_exercises, list):
-                st.write(f"Recommended Exercises for {selected_gender}, Age {age}, BMI Category {selected_bmi_category}:")
-                for exercise in recommended_exercises:
-                    st.write(f"- {exercise}")
+                # Iterate through all recommended exercise categories
+                for exercise_category in recommended_exercises:
+                    # Filter the DataFrame for the specific exercise category
+                    exercise_rows = df[df['Exercise Category'] == exercise_category]
+
+                    if not exercise_rows.empty:
+                        st.write(f"**Exercise Category:** {exercise_category}")
+
+                        seen_exercises = set()  # Set to track seen exercises
+
+                        for _, row in exercise_rows.iterrows():
+                            # Loop through the columns that contain exercise types and image paths
+                            for i in range(40):  # Assuming you have 40 columns (adjust based on your data)
+                                exercise_col = f'Exercise Types.{i}' if i > 0 else 'Exercise Types'
+                                image_col = f'Image Paths.{i}' if i > 0 else 'Image Paths'
+
+                                # Check if the exercise type is not empty
+                                exercise_type = row.get(exercise_col)
+                                if pd.notna(exercise_type) and exercise_type not in seen_exercises:
+                                    st.write(f"- **Exercise Type:** {exercise_type}")
+                                    seen_exercises.add(exercise_type)  # Add the exercise to the set
+
+                                    image_paths = safe_literal_eval(row.get(image_col))  # Get image paths safely
+
+                                    # Flatten the image paths if needed
+                                    image_paths = flatten_image_paths(image_paths)
+
+                                    for img in image_paths:
+                                        # Ensure the correct file path
+                                        img = img.replace("\\", "/")  # Normalize the file path for Windows
+
+                                        # Check if the image exists
+                                        if os.path.exists(img):
+                                            st.image(img, caption=exercise_type, use_column_width=True)
+                                        else:
+                                            st.write(f"Image not found: {img}")
+                                elif exercise_type in seen_exercises:
+                                    # Skip the duplicate exercise type
+                                    continue
+                    else:
+                        st.write(f"No details found for the exercise category: {exercise_category}.")
             else:
-                st.write(recommended_exercises)
-        
-        elif selected_choice == "Recommended Exercises by Intensity":
-            recommended_exercises = get_recommended_exercises_intensity(df, selected_intensity_category, duration)
-            if isinstance(recommended_exercises, list):
-                st.write(f"Recommended Exercises for {selected_intensity_category} Intensity Category with <= {duration} min duration:")
-                for exercise in recommended_exercises:
-                    st.write(f"- {exercise}")
-            else:
-                st.write(recommended_exercises)
+                st.write("No recommended exercises found.")
+        else:
+            st.write("Please get recommendations first before displaying exercises.")
 
-# Main function to set up the dashboard
+
 def app():
-    st.title(f"{TITLE_ICON} Basic Recommendation")
-    st.header("Exercise Recommendation Dashboard")
-    st.markdown("""
-    This dashboard provides key insights into exercise recommendations based on user profiles.
+    st.markdown(
+        f"""
+        <h1 style='text-align: center; color: black;'> {TITLE_ICON} Revivo Basic Recommendation</h1>""",
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        f"""
+            <h1 style='text-align: left; font-size: 20px; color: black;'> Exercise Recommendation Dashboard </h1>
+            """,
+        unsafe_allow_html=True
+    )
+    st.markdown("""This dashboard provides key insights into exercise recommendations based on user profiles.
     You can filter recommendations based on your personal characteristics, such as age, gender, BMI, and exercise intensity.
     Explore and discover exercises that best match your fitness goals!
     """)
     st.divider()
 
-    file_path = 'health_data/'
-    file_name = 'exercise_dataset.csv'
+    file_path = "C:/Users/ERC/Desktop/cleaned_exercise_data.csv"
 
     # Load and preprocess the data
-    df = get_data(file_path, file_name)
-    df = categorize_bmi(df)
-    df = apply_exercise_intensity(df)
+    df = get_data(file_path)
 
-    # Display the dashboard
+    df = get_bmi_category(df)  # Add BMI category
+    df = one_hot_encode_bmi_category(df)  # Encode BMI
     streamlit_dashboard(df)
+    # Input fields
+
+
+if __name__ == "__main__":
+    app()

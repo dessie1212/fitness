@@ -188,7 +188,7 @@ def app():
     st.divider()
 
     # File path and name for the data
-    file_path = 'health_data/'
+    file_path = 'C:/Users/ERC/Desktop/Exercise recommendation python/Exercise-Recommendation-System/health_data/'
     file_name = 'exercise_dataset.csv'
 
     # Load and preprocess the data
